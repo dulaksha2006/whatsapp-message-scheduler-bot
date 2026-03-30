@@ -12,11 +12,11 @@ const fs = require('fs');
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, '../public')));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ── In-memory store ──────────────────────────────────────────────────────────
-const DB_FILE = path.join(__dirname, '../data/schedules.json');
-const DATA_DIR = path.join(__dirname, '../data');
+const DB_FILE = path.join(__dirname, 'data/schedules.json');
+const DATA_DIR = path.join(__dirname, 'data');
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -46,7 +46,7 @@ function addLog(msg, type = 'info') {
 }
 
 const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: path.join(__dirname, '../.wwebjs_auth') }),
+  authStrategy: new LocalAuth({ dataPath: path.join(__dirname, '.wwebjs_auth') }),
   puppeteer: {
     headless: true,
     args: [
