@@ -7,13 +7,13 @@
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
-  "keywords": ["whatsapp", "scheduler"],
   "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "node-cron": "^3.0.3",
     "qrcode": "^1.5.3",
+    "socket.io": "^4.7.5",
     "uuid": "^9.0.0",
     "whatsapp-web.js": "^1.23.0"
   }
