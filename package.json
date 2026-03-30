@@ -1,0 +1,21 @@
+{
+  "name": "whatsapp-scheduler",
+  "version": "1.0.0",
+  "description": "WhatsApp message scheduler with web dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": ["whatsapp", "scheduler", "baileys"],
+  "license": "MIT",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "pino": "^9.0.0",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.3",
+    "uuid": "^13.0.0"
+  }
+}
