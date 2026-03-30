@@ -33,4 +33,4 @@ COPY . .
 RUN mkdir -p data .wwebjs_auth
 
 EXPOSE 3000
-CMD ["node", "src/server.js"]
+CMD ["node", "server.js"]
