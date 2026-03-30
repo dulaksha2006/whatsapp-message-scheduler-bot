@@ -7,7 +7,6 @@ const http = require('http');
 const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
 const qrcode = require('qrcode');
-const cron = require('node-cron');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const fs = require('fs');
 
@@ -27,7 +26,7 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 function loadDB() {
   try { if (fs.existsSync(DB_FILE)) return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); }
   catch (_) {}
-  return { scheduled: [], sent: [], failed: [] };
+  return { scheduled: [], sent: [] };
 }
 function saveDB(db) { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
 
@@ -81,10 +80,8 @@ client.on('disconnected', (reason) => {
   io.emit('status', { state: 'disconnected', message: 'Disconnected: ' + reason });
 });
 
-// Auto-start on boot
 client.initialize().catch(e => {
   connectionStatus = 'disconnected';
-  io.emit('status', { state: 'disconnected', message: 'Start failed: ' + e.message });
   console.error('Initialize error:', e.message);
 });
 
@@ -96,28 +93,34 @@ io.on('connection', (socket) => {
   }
   socket.emit('status', { state: connectionStatus, message: connectionStatus });
 
-  // Push current data
   const db = loadDB();
   socket.emit('schedule_update', db.scheduled);
   socket.emit('sent_update', db.sent);
 });
 
-// ── Scheduler ─────────────────────────────────────────────────────────────────
-const activeJobs = {};
+// ── Scheduler — uses setTimeout so no timezone math needed ───────────────────
+// activeTimers: id -> { timer, schedule }
+const activeTimers = {};
 
-async function sendScheduledMessage(schedule) {
+async function sendScheduledMessage(id) {
+  delete activeTimers[id];
+
+  const db = loadDB();
+  const schedule = db.scheduled.find(s => s.id === id);
+  if (!schedule || schedule.status !== 'pending') return;
+
   if (!clientReady) {
     console.warn(`Skipping "${schedule.label}" — client not ready`);
+    // Retry in 30s
+    activeTimers[id] = setTimeout(() => sendScheduledMessage(id), 30000);
     return;
   }
-  const db = loadDB();
+
   try {
     const chatId = schedule.phone.includes('@') ? schedule.phone : `${schedule.phone}@c.us`;
     await client.sendMessage(chatId, schedule.message);
 
-    const idx = db.scheduled.findIndex(s => s.id === schedule.id);
-    if (idx !== -1) db.scheduled.splice(idx, 1);
-
+    db.scheduled = db.scheduled.filter(s => s.id !== id);
     const sent = { ...schedule, status: 'sent', sentAt: new Date().toISOString() };
     db.sent.unshift(sent);
     saveDB(db);
@@ -125,72 +128,85 @@ async function sendScheduledMessage(schedule) {
     io.emit('schedule_update', db.scheduled);
     io.emit('sent_update', db.sent);
     io.emit('message_sent', sent);
+    console.log(`✓ Sent "${schedule.label}" to ${schedule.phone}`);
   } catch (err) {
-    const idx = db.scheduled.findIndex(s => s.id === schedule.id);
-    if (idx !== -1) {
-      db.scheduled[idx].status = 'failed';
-      db.scheduled[idx].error = err.message;
-    }
+    const s = db.scheduled.find(x => x.id === id);
+    if (s) { s.status = 'failed'; s.error = err.message; }
     saveDB(db);
     io.emit('schedule_update', db.scheduled);
     io.emit('message_failed', { ...schedule, error: err.message });
-    console.error(`Failed "${schedule.label}":`, err.message);
+    console.error(`✗ Failed "${schedule.label}":`, err.message);
   }
 }
 
-function startJob(schedule) {
-  if (activeJobs[schedule.id]) { activeJobs[schedule.id].stop(); delete activeJobs[schedule.id]; }
+function scheduleTimer(schedule) {
+  if (activeTimers[schedule.id]) {
+    clearTimeout(activeTimers[schedule.id]);
+    delete activeTimers[schedule.id];
+  }
   if (schedule.status !== 'pending') return;
 
-  const d = new Date(schedule.scheduledAt);
-  const expr = `${d.getMinutes()} ${d.getHours()} ${d.getDate()} ${d.getMonth() + 1} *`;
+  // scheduledAt is stored as ISO string (UTC) — Date.parse gives ms since epoch
+  const delay = Date.parse(schedule.scheduledAt) - Date.now();
 
-  if (!cron.validate(expr)) { console.error('Invalid cron:', expr); return; }
-
-  activeJobs[schedule.id] = cron.schedule(expr, () => {
-    sendScheduledMessage(schedule);
-    activeJobs[schedule.id]?.stop();
-    delete activeJobs[schedule.id];
-  }, { timezone: schedule.timezone || 'UTC' });
+  if (delay <= 0) {
+    // Already past — send immediately
+    sendScheduledMessage(schedule.id);
+  } else {
+    console.log(`Scheduling "${schedule.label}" in ${Math.round(delay/1000)}s`);
+    activeTimers[schedule.id] = setTimeout(() => sendScheduledMessage(schedule.id), delay);
+  }
 }
 
 function initJobs() {
   const db = loadDB();
-  db.scheduled.filter(s => s.status === 'pending').forEach(startJob);
+  db.scheduled.filter(s => s.status === 'pending').forEach(scheduleTimer);
 }
 
 // ── REST API ──────────────────────────────────────────────────────────────────
 
-// GET /api/messages — initial page load data
+// GET /api/messages
 app.get('/api/messages', (req, res) => {
   const db = loadDB();
-  res.json({ scheduled: db.scheduled, sent: db.sent, failed: db.failed || [] });
+  res.json({ scheduled: db.scheduled, sent: db.sent, failed: [] });
 });
 
-// POST /api/schedule — create
+// POST /api/schedule
 app.post('/api/schedule', (req, res) => {
   const { phone, message, scheduledAt, label } = req.body;
   if (!phone || !message || !scheduledAt)
     return res.status(400).json({ success: false, error: 'phone, message, scheduledAt required' });
 
+  // scheduledAt from browser datetime-local is like "2026-03-30T18:00"
+  // We must treat it as UTC to match server time.
+  // Frontend should send ISO with offset — accept both.
+  const scheduledMs = Date.parse(scheduledAt);
+  if (isNaN(scheduledMs))
+    return res.status(400).json({ success: false, error: 'Invalid scheduledAt format' });
+
+  if (scheduledMs <= Date.now())
+    return res.status(400).json({ success: false, error: 'Schedule time must be in the future' });
+
   const db = loadDB();
   const schedule = {
-    id: uuidv4(), phone, message, scheduledAt,
+    id: uuidv4(),
+    phone,
+    message,
+    scheduledAt: new Date(scheduledMs).toISOString(), // Store as proper UTC ISO
     label: label || '',
     status: 'pending',
     createdAt: new Date().toISOString(),
-    timezone: 'UTC',
   };
 
   db.scheduled.push(schedule);
   saveDB(db);
-  startJob(schedule);
+  scheduleTimer(schedule);
 
   io.emit('schedule_update', db.scheduled);
   res.json({ success: true, schedule });
 });
 
-// DELETE /api/schedule/:id — cancel
+// DELETE /api/schedule/:id
 app.delete('/api/schedule/:id', (req, res) => {
   const db = loadDB();
   const idx = db.scheduled.findIndex(s => s.id === req.params.id);
@@ -199,19 +215,22 @@ app.delete('/api/schedule/:id', (req, res) => {
   db.scheduled.splice(idx, 1);
   saveDB(db);
 
-  if (activeJobs[req.params.id]) { activeJobs[req.params.id].stop(); delete activeJobs[req.params.id]; }
+  if (activeTimers[req.params.id]) {
+    clearTimeout(activeTimers[req.params.id]);
+    delete activeTimers[req.params.id];
+  }
+
   io.emit('schedule_update', db.scheduled);
   res.json({ success: true });
 });
 
-// POST /api/send-now — instant send
+// POST /api/send-now
 app.post('/api/send-now', async (req, res) => {
   const { phone, message } = req.body;
   if (!clientReady) return res.status(400).json({ success: false, error: 'WhatsApp not connected' });
   try {
     const chatId = phone.includes('@') ? phone : `${phone}@c.us`;
     await client.sendMessage(chatId, message);
-
     const db = loadDB();
     const sent = { id: uuidv4(), phone, message, label: 'instant', status: 'sent', sentAt: new Date().toISOString() };
     db.sent.unshift(sent);
@@ -224,11 +243,10 @@ app.post('/api/send-now', async (req, res) => {
   }
 });
 
-// DELETE /api/history — clear sent/failed
+// DELETE /api/history
 app.delete('/api/history', (req, res) => {
   const db = loadDB();
   db.sent = [];
-  db.failed = [];
   saveDB(db);
   io.emit('sent_update', []);
   res.json({ success: true });

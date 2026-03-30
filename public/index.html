@@ -401,7 +401,7 @@ async function scheduleMessage() {
   const btn = document.getElementById('scheduleBtn');
   btn.disabled = true; btn.textContent = 'Scheduling...';
   try {
-    const res = await fetch('/api/schedule', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ phone, message, scheduledAt, label }) });
+    const res = await fetch('/api/schedule', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ phone, message, scheduledAt: new Date(scheduledAt).toISOString(), label }) });
     const data = await res.json();
     if (data.success) {
       toast('⏰ Message scheduled!', 'success');
